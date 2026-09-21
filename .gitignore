@@ -1,0 +1,17 @@
+# Build output
+dist/
+
+# Personal data used while testing
+*.gpx
+*.csv
+
+# Lightroom / OS / editor noise
+*.lrplugin/**/*.log
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# Claude Code local files
+.claude/
