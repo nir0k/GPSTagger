@@ -13,5 +13,9 @@ desktop.ini
 .vscode/
 .idea/
 
-# Claude Code local files
+tmp/
+
+# Local agent state and instructions.
 .claude/
+CLAUDE.md
+AGENTS.md

@@ -12,10 +12,11 @@ function Photos.getSelected(catalog)
     return catalog:getTargetPhotos() or {}
 end
 
--- Returns an array of { ref=LrPhoto, name=, captureWall=, gps= }, sorted by capture time.
+-- Returns an array of { ref=LrPhoto, name=, captureWall=, gps=, gpsAltitude=,
+-- gpsImgDirection= }, sorted by capture time.
 function Photos.read(catalog, lrPhotos)
     local meta = catalog:batchGetRawMetadata(lrPhotos,
-        { "path", "dateTime", "dateTimeOriginal", "gps" })
+        { "path", "dateTime", "dateTimeOriginal", "gps", "gpsAltitude", "gpsImgDirection" })
 
     local list = {}
     for _, p in ipairs(lrPhotos) do
@@ -27,6 +28,8 @@ function Photos.read(catalog, lrPhotos)
             name = m.path and LrPathUtils.leafName(m.path) or "?",
             captureWall = cocoa and DateTime.cocoaToWallUnix(cocoa) or nil,
             gps = m.gps,
+            gpsAltitude = m.gpsAltitude,
+            gpsImgDirection = m.gpsImgDirection,
         }
     end
 

@@ -11,6 +11,60 @@ local DateTime = require "DateTime"
 
 local Parser = {}
 
+-- Removes comments and unwraps CDATA without allowing either construct inside a tag.
+-- This is deliberately a small scanner rather than a blind gsub, which could turn
+-- malformed input such as <trk<!--...-->pt> into a valid-looking tag.
+local function stripXmlNonMarkup(text)
+    local out = {}
+    local scan, copyFrom = 1, 1
+    local inTag, quote = false, nil
+
+    while true do
+        local pos = text:find("[<>'\"]", scan)
+        if not pos then break end
+        local ch = text:sub(pos, pos)
+
+        if quote then
+            if ch == quote then quote = nil end
+            scan = pos + 1
+        elseif inTag then
+            if ch == "'" or ch == '"' then
+                quote = ch
+            elseif ch == ">" then
+                inTag = false
+            elseif ch == "<" then
+                return nil, "The GPX file is malformed XML (markup inside a tag)."
+            end
+            scan = pos + 1
+        elseif ch == "<" then
+            if text:sub(pos, pos + 3) == "<!--" then
+                local close = text:find("-->", pos + 4, true)
+                if not close then return nil, "The GPX file is malformed XML (unclosed comment)." end
+                out[#out + 1] = text:sub(copyFrom, pos - 1)
+                out[#out + 1] = " "
+                scan, copyFrom = close + 3, close + 3
+            elseif text:sub(pos, pos + 8) == "<![CDATA[" then
+                local close = text:find("]]>", pos + 9, true)
+                if not close then return nil, "The GPX file is malformed XML (unclosed CDATA)." end
+                local value = text:sub(pos + 9, close - 1)
+                value = value:gsub("<", "&lt;"):gsub(">", "&gt;")
+                out[#out + 1] = text:sub(copyFrom, pos - 1)
+                out[#out + 1] = " " .. value .. " "
+                scan, copyFrom = close + 3, close + 3
+            else
+                inTag = true
+                scan = pos + 1
+            end
+        else
+            scan = pos + 1
+        end
+    end
+
+    if inTag or quote then return nil, "The GPX file is malformed XML (unclosed tag)." end
+    out[#out + 1] = text:sub(copyFrom)
+    return table.concat(out)
+end
+
 local function attr(attrs, name)
     -- name="..." or name='...' as a whole attribute name (attrs starts with whitespace)
     return attrs:match("%s" .. name .. "%s*=%s*\"([^\"]*)\"")
@@ -27,12 +81,13 @@ local function parsePoints(body, points, stats)
         if selfClose ~= "/" then
             local cs, ce = body:find("</trkpt>", e + 1, true)
             if not cs then
-                inner = body:sub(e + 1)
-                pos = #body + 1
-            else
-                inner = body:sub(e + 1, cs - 1)
-                pos = ce + 1
+                return nil, "The GPX file is malformed XML (unclosed <trkpt>)."
             end
+            inner = body:sub(e + 1, cs - 1)
+            if inner:find("<trkpt[%s>]") then
+                return nil, "The GPX file is malformed XML (nested or unclosed <trkpt>)."
+            end
+            pos = ce + 1
         else
             pos = e + 1
         end
@@ -54,6 +109,7 @@ local function parsePoints(body, points, stats)
             end
         end
     end
+    return true
 end
 
 -- Some devices write glitch timestamps (e.g. a point dated days later between two normal
@@ -87,6 +143,9 @@ function Parser.parse(text)
     if type(text) ~= "string" or text == "" then
         return nil, "The GPX file is empty."
     end
+    local cleaned, cleanErr = stripXmlNonMarkup(text)
+    if not cleaned then return nil, cleanErr end
+    text = cleaned
     if not text:find("<gpx[%s>]") then
         return nil, "The file is not a valid GPX (no <gpx> element)."
     end
@@ -111,7 +170,8 @@ function Parser.parse(text)
                 return nil, "The GPX file is malformed XML (unclosed <trkseg>)."
             end
             local points = {}
-            parsePoints(text:sub(e + 1, cs - 1), points, stats)
+            local ok, err = parsePoints(text:sub(e + 1, cs - 1), points, stats)
+            if not ok then return nil, err end
             points = cleanSegment(points, stats)
             if #points > 0 then
                 track.segments[#track.segments + 1] = { points = points }
@@ -123,7 +183,8 @@ function Parser.parse(text)
     if not sawSegment then
         -- Tolerate <trkpt> outside of <trkseg> as one implicit segment.
         local points = {}
-        parsePoints(text, points, stats)
+        local ok, err = parsePoints(text, points, stats)
+        if not ok then return nil, err end
         points = cleanSegment(points, stats)
         if #points > 0 then
             track.segments[1] = { points = points }

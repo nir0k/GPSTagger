@@ -19,6 +19,9 @@ end
 local function near(a, b, msg)
     if a == nil or math.abs(a - b) > 1e-6 then error((msg or "") .. " expected ~" .. tostring(b) .. ", got " .. tostring(a), 2) end
 end
+local function T(value)
+    return assert(DateTime.parseXsdDateTime(value))
+end
 
 local function gpx(body) return '<?xml version="1.0"?><gpx version="1.1" creator="t"><trk>' .. body .. '</trk></gpx>' end
 local function pt(lat, lon, time, ele)
@@ -34,6 +37,18 @@ test("xsd Z / offset / millis", function()
     near(DateTime.parseXsdDateTime("2026-09-18T10:42:15.123+02:00"), z + 0.123)
     eq(DateTime.parseXsdDateTime("1970-01-01T00:00:00Z"), 0)
     eq(DateTime.parseXsdDateTime("garbage"), nil)
+end)
+test("invalid xsd dates and offsets are rejected", function()
+    eq(DateTime.parseXsdDateTime("2026-02-31T08:00:00Z"), nil)
+    eq(DateTime.parseXsdDateTime("2025-02-29T08:00:00Z"), nil)
+    eq(DateTime.parseXsdDateTime("2026-01-01T24:59:59Z"), nil)
+    eq(DateTime.parseXsdDateTime("2026-01-01T08:00:00+14:01"), nil)
+    eq(DateTime.formatDateTime(assert(DateTime.parseXsdDateTime("2026-01-01T24:00:00Z"))),
+        "2026-01-02 00:00:00")
+end)
+test("xsd leap second is accepted", function()
+    eq(DateTime.parseXsdDateTime("2016-12-31T23:59:60Z"),
+        DateTime.parseXsdDateTime("2017-01-01T00:00:00Z"))
 end)
 test("format round trip", function()
     eq(DateTime.formatDateTime(DateTime.parseXsdDateTime("2026-09-18T08:42:15Z")), "2026-09-18 08:42:15")
@@ -71,6 +86,31 @@ test("malformed and non-gpx", function()
     eq((Parser.parse("<html></html>")), nil)
     eq((Parser.parse('<gpx><trk><trkseg><trkpt lat="1" lon="2">')), nil)
     eq((Parser.parse(gpx(seg(pt("abc", 2, "2026-09-18T08:42:10Z"))))), nil)
+end)
+test("unclosed and nested track points are rejected", function()
+    local unclosed = '<gpx><trk><trkseg><trkpt lat="1" lon="2"><time>2026-09-18T08:42:10Z</time></trkseg></trk></gpx>'
+    eq((Parser.parse(unclosed)), nil)
+
+    local nested = '<gpx><trk><trkseg><trkpt lat="1" lon="2"><time>2026-09-18T08:42:10Z</time>' ..
+        '<trkpt lat="3" lon="4"><time>2026-09-18T08:42:11Z</time></trkpt></trkseg></trk></gpx>'
+    eq((Parser.parse(nested)), nil)
+end)
+test("track-point-like text in comments and CDATA is ignored", function()
+    local body = '<!-- documentation mentioning <trkpt lat="x"> -->' ..
+        '<trkpt lat="1" lon="2"><extensions><![CDATA[<trkpt lat="x">]]></extensions>' ..
+        '<time><![CDATA[2026-09-18T08:42:10Z]]></time></trkpt>'
+    local t = assert(Parser.parse(gpx(seg(body))))
+    eq(t.stats.totalPoints, 1)
+    eq(#t.segments[1].points, 1)
+end)
+test("comments and CDATA cannot splice XML tag names", function()
+    local comment = '<gpx><trk><trkseg><trk<!--x-->pt lat="1" lon="2">' ..
+        '<time>2026-09-18T08:42:10Z</time></trkpt></trkseg></trk></gpx>'
+    eq((Parser.parse(comment)), nil)
+
+    local cdata = '<gpx><trk><trkseg><trk<![CDATA[x]]>pt lat="1" lon="2">' ..
+        '<time>2026-09-18T08:42:10Z</time></trkpt></trkseg></trk></gpx>'
+    eq((Parser.parse(cdata)), nil)
 end)
 test("glitch timestamps are dropped", function()
     local t = assert(Parser.parse(gpx(seg(
@@ -142,6 +182,12 @@ test("existing GPS skip vs overwrite", function()
     eq(one(track, T("2026-09-18T10:42:15Z"), nil, gps).status, Matcher.HAS_GPS)
     eq(one(track, T("2026-09-18T10:42:15Z"), { overwrite = true }, gps).status, Matcher.MATCH)
 end)
+test("existing GPS without timestamp is still skipped and retained", function()
+    local gps = { latitude = 1, longitude = 2 }
+    local it = one(track, nil, nil, gps)
+    eq(it.status, Matcher.HAS_GPS)
+    near(it.latitude, 1); near(it.longitude, 2)
+end)
 test("no timestamp", function()
     eq(one(track, nil).status, Matcher.NO_TIMESTAMP)
 end)
@@ -176,6 +222,171 @@ test("csv export: header, quoting, all rows", function()
     assert(lines[2]:find("MATCH", 1, true))
     assert(lines[3]:find("NO TIMESTAMP", 1, true))
 end)
+
+-- ---- MetadataWriter (with minimal Lightroom API stubs) ----
+test("metadata writer clears stale altitude when a match has no elevation", function()
+    local savedImport = _G.import
+    local savedLogger = package.loaded.Logger
+    local savedWriter = package.loaded.MetadataWriter
+
+    local ok, err = pcall(function()
+        _G.import = function(name)
+            if name == "LrTasks" then return { yield = function() end } end
+            if name == "LrProgressScope" then
+                return function()
+                    return {
+                        setCancelable = function() end,
+                        isCanceled = function() return false end,
+                        setPortionComplete = function() end,
+                        setCaption = function() end,
+                        done = function() end,
+                    }
+                end
+            end
+            error("Unexpected import: " .. tostring(name))
+        end
+        package.loaded.Logger = { error = function() end }
+        package.loaded.MetadataWriter = nil
+
+        local writes = {}
+        local metadata = {
+            gps = { latitude = 10, longitude = 20 },
+            gpsAltitude = 100,
+            gpsImgDirection = 90,
+        }
+        local photoRef = {
+            setRawMetadata = function(_, key, value)
+                writes[#writes + 1] = { key = key, value = value }
+                if key == "gps" and value == nil then
+                    metadata.gps = nil
+                    metadata.gpsAltitude = nil
+                    metadata.gpsImgDirection = nil
+                else
+                    metadata[key] = value
+                end
+            end,
+            getRawMetadata = function(_, key)
+                return metadata[key]
+            end,
+        }
+        local catalog = {
+            withWriteAccessDo = function(_, _, fn)
+                fn()
+                return "executed"
+            end,
+        }
+        local MetadataWriter = require "MetadataWriter"
+        local result = MetadataWriter.apply(catalog, {
+            { status = Matcher.MATCH, latitude = 1, longitude = 2,
+              altitude = nil, photo = {
+                  name = "x", ref = photoRef,
+                  gps = { latitude = 10, longitude = 20 },
+                  gpsAltitude = 100,
+                  gpsImgDirection = 90,
+              } },
+        }, {})
+
+        eq(result.applied, 1)
+        eq(#writes, 3)
+        eq(writes[1].key, "gps")
+        eq(writes[1].value, nil)
+        near(metadata.gps.latitude, 1)
+        near(metadata.gps.longitude, 2)
+        eq(metadata.gpsAltitude, nil)
+        eq(metadata.gpsImgDirection, 90)
+
+        writes = {}
+        local elevated = MetadataWriter.apply(catalog, {
+            { status = Matcher.MATCH, latitude = 3, longitude = 4,
+              altitude = 0, photo = { name = "sea-level", ref = photoRef } },
+        }, {})
+        eq(elevated.applied, 1)
+        eq(#writes, 2)
+        eq(writes[2].key, "gpsAltitude")
+        eq(writes[2].value, 0)
+        eq(metadata.gpsAltitude, 0)
+
+        -- If the SDK does not clear altitude along with gps, abort and restore the
+        -- original coordinates instead of committing a mismatched partial update.
+        metadata.gps = { latitude = 10, longitude = 20 }
+        metadata.gpsAltitude = 100
+        writes = {}
+        local stubbornRef = {
+            setRawMetadata = function(_, key, value)
+                writes[#writes + 1] = { key = key, value = value }
+                metadata[key] = value -- deliberately leaves gpsAltitude intact for gps=nil
+            end,
+            getRawMetadata = function(_, key) return metadata[key] end,
+        }
+        local notCleared = MetadataWriter.apply(catalog, {
+            { status = Matcher.MATCH, latitude = 5, longitude = 6,
+              altitude = nil, photo = {
+                  name = "stubborn", ref = stubbornRef,
+                  gps = { latitude = 10, longitude = 20 }, gpsAltitude = 100,
+              } },
+        }, {})
+        eq(notCleared.applied, 0)
+        eq(notCleared.errors, 1)
+        near(metadata.gps.latitude, 10)
+        near(metadata.gps.longitude, 20)
+        eq(metadata.gpsAltitude, 100)
+
+        -- A failure after clearing the old GPS must restore the original values.
+        metadata.gps = { latitude = 10, longitude = 20 }
+        metadata.gpsAltitude = 100
+        writes = {}
+        local failReplacement = true
+        local failingRef = {
+            setRawMetadata = function(_, key, value)
+                writes[#writes + 1] = { key = key, value = value }
+                if key == "gps" and value == nil then
+                    metadata.gps = nil
+                    metadata.gpsAltitude = nil
+                elseif key == "gps" and failReplacement then
+                    failReplacement = false
+                    error("replacement failed")
+                else
+                    metadata[key] = value
+                end
+            end,
+            getRawMetadata = function(_, key) return metadata[key] end,
+        }
+        local failedWrite = MetadataWriter.apply(catalog, {
+            { status = Matcher.MATCH, latitude = 7, longitude = 8,
+              altitude = nil, photo = {
+                  name = "failing", ref = failingRef,
+                  gps = { latitude = 10, longitude = 20 }, gpsAltitude = 100,
+              } },
+        }, {})
+        eq(failedWrite.applied, 0)
+        eq(failedWrite.errors, 1)
+        near(metadata.gps.latitude, 10)
+        near(metadata.gps.longitude, 20)
+        eq(metadata.gpsAltitude, 100)
+
+        -- A standalone old altitude (without coordinates) must also be cleared.
+        metadata.gps = nil
+        metadata.gpsAltitude = 50
+        metadata.gpsImgDirection = nil
+        writes = {}
+        local standalone = MetadataWriter.apply(catalog, {
+            { status = Matcher.MATCH, latitude = 9, longitude = 10,
+              altitude = nil, photo = {
+                  name = "standalone-altitude", ref = photoRef, gpsAltitude = 50,
+              } },
+        }, {})
+        eq(standalone.applied, 1)
+        near(metadata.gps.latitude, 9)
+        near(metadata.gps.longitude, 10)
+        eq(metadata.gpsAltitude, nil)
+    end)
+
+    _G.import = savedImport
+    package.loaded.Logger = savedLogger
+    package.loaded.MetadataWriter = savedWriter
+    if not ok then error(err, 0) end
+end)
+
 -- ---- OffsetDetector ----
 test("offset detection by time range", function()
     -- track 08:00-09:00 UTC (one point per minute); photos taken 08:10-08:40 UTC, camera at UTC+3

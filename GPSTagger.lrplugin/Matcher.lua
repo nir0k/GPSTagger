@@ -67,7 +67,12 @@ function Matcher.plan(track, photos, settings)
         local item = { photo = photo }
         items[#items + 1] = item
 
-        if not photo.captureWall then
+        if photo.gps and not settings.overwrite then
+            item.status = Matcher.HAS_GPS
+            item.latitude, item.longitude = photo.gps.latitude, photo.gps.longitude
+            item.detail = "Photo already has GPS"
+            summary.hasGps = summary.hasGps + 1
+        elseif not photo.captureWall then
             item.status = Matcher.NO_TIMESTAMP
             item.detail = "Photo has no capture time"
             summary.noTimestamp = summary.noTimestamp + 1
@@ -75,22 +80,15 @@ function Matcher.plan(track, photos, settings)
             local T = photo.captureWall - settings.offsetSeconds
             item.correctedTime = T
 
-            if photo.gps and not settings.overwrite then
-                item.status = Matcher.HAS_GPS
-                item.latitude, item.longitude = photo.gps.latitude, photo.gps.longitude
-                item.detail = "Photo already has GPS"
-                summary.hasGps = summary.hasGps + 1
+            local r = Matcher.locate(index, T)
+            item.status = r.status
+            item.detail = r.detail
+            if r.status == Matcher.MATCH then
+                item.latitude, item.longitude = r.latitude, r.longitude
+                item.altitude, item.delta = r.altitude, r.delta
+                summary.match = summary.match + 1
             else
-                local r = Matcher.locate(index, T)
-                item.status = r.status
-                item.detail = r.detail
-                if r.status == Matcher.MATCH then
-                    item.latitude, item.longitude = r.latitude, r.longitude
-                    item.altitude, item.delta = r.altitude, r.delta
-                    summary.match = summary.match + 1
-                else
-                    summary.outside = summary.outside + 1
-                end
+                summary.outside = summary.outside + 1
             end
         end
     end

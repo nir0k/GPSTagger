@@ -31,6 +31,15 @@ local function civilFromDays(z)
     return y, m, d
 end
 
+local function daysInMonth(y, m)
+    if m == 2 then
+        local leap = y % 4 == 0 and (y % 100 ~= 0 or y % 400 == 0)
+        return leap and 29 or 28
+    end
+    if m == 4 or m == 6 or m == 9 or m == 11 then return 30 end
+    return 31
+end
+
 -- Parses "+02:00", "-04:00", "+0530", "Z" into an offset in seconds. Returns nil if malformed.
 function DateTime.parseOffset(str)
     if not str then return nil end
@@ -43,7 +52,7 @@ function DateTime.parseOffset(str)
     end
     if not sign then return nil end
     h, m = tonumber(h), tonumber(m)
-    if m > 59 or h > 18 then return nil end
+    if m > 59 or h > 14 or (h == 14 and m ~= 0) then return nil end
     local secs = h * 3600 + m * 60
     return sign == "-" and -secs or secs
 end
@@ -76,7 +85,6 @@ function DateTime.parseXsdDateTime(str)
     local y, mo, d, h, mi, s, rest = str:match("^(-?%d%d%d%d+)-(%d%d)-(%d%d)[Tt](%d%d):(%d%d):(%d%d)(.*)$")
     if not y then return nil end
     y, mo, d, h, mi, s = tonumber(y), tonumber(mo), tonumber(d), tonumber(h), tonumber(mi), tonumber(s)
-    if mo < 1 or mo > 12 or d < 1 or d > 31 or h > 24 or mi > 59 or s > 60 then return nil end
 
     local frac = 0
     local fracStr, tz = rest:match("^%.(%d+)(.*)$")
@@ -84,6 +92,11 @@ function DateTime.parseXsdDateTime(str)
         frac = tonumber("0." .. fracStr)
     else
         tz = rest
+    end
+
+    if mo < 1 or mo > 12 or d < 1 or d > daysInMonth(y, mo) or
+        h > 24 or mi > 59 or s > 60 or (h == 24 and (mi ~= 0 or s ~= 0 or frac ~= 0)) then
+        return nil
     end
 
     local offset = 0
