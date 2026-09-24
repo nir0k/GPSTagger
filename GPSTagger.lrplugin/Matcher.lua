@@ -66,6 +66,9 @@ function Matcher.plan(track, photos, settings)
     for _, photo in ipairs(photos) do
         local item = { photo = photo }
         items[#items + 1] = item
+        if photo.captureWall then
+            item.correctedTime = photo.captureWall - settings.offsetSeconds
+        end
 
         if photo.gps and not settings.overwrite then
             item.status = Matcher.HAS_GPS
@@ -77,9 +80,7 @@ function Matcher.plan(track, photos, settings)
             item.detail = "Photo has no capture time"
             summary.noTimestamp = summary.noTimestamp + 1
         else
-            local T = photo.captureWall - settings.offsetSeconds
-            item.correctedTime = T
-
+            local T = item.correctedTime
             local r = Matcher.locate(index, T)
             item.status = r.status
             item.detail = r.detail

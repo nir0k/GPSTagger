@@ -182,6 +182,12 @@ test("existing GPS skip vs overwrite", function()
     eq(one(track, T("2026-09-18T10:42:15Z"), nil, gps).status, Matcher.HAS_GPS)
     eq(one(track, T("2026-09-18T10:42:15Z"), { overwrite = true }, gps).status, Matcher.MATCH)
 end)
+test("existing GPS skip still reports corrected time", function()
+    local gps = { latitude = 1, longitude = 2 }
+    local it = one(track, T("2026-09-18T12:42:15Z"), { offsetSeconds = 7200 }, gps)
+    eq(it.status, Matcher.HAS_GPS)
+    eq(it.correctedTime, T("2026-09-18T10:42:15Z"))
+end)
 test("existing GPS without timestamp is still skipped and retained", function()
     local gps = { latitude = 1, longitude = 2 }
     local it = one(track, nil, nil, gps)
